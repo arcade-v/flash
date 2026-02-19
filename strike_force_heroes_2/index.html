@@ -23,12 +23,12 @@
     <script>
       function loadLocalRuffle() {
           var script = document.createElement('script');
-          script.src = 'https://cdn.jsdelivr.net/gh/FutureElliotto/Arcade-4-https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle/ruffle.js';
+          script.src = 'https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle/ruffle.js';
           document.body.appendChild(script);
       }
 
       var cdnScript = document.createElement('script');
-      cdnScript.src = 'https://cdn.jsdelivr.net/gh/FutureElliotto/Arcade-4-https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle/ruffle.js';
+      cdnScript.src = 'https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle/ruffle.js';
       cdnScript.onerror = loadLocalRuffle;
       document.body.appendChild(cdnScript);
     </script>
