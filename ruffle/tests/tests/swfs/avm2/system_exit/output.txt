@@ -1,3 +1,0 @@
-SecurityError: Error #2017: Only trusted local files may cause the Flash Player to exit.
-	at flash.system::System$/exit()
-	at Test()

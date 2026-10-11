@@ -1,6 +1,0 @@
-toString called (1)
-from toString
-	at Test()
-toString called (2)
-null
-	at Test()

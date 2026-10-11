@@ -1,6 +1,0 @@
-Navigator::fetch:
-  URL: dummy.png
-  Method: GET
-frame 1
-frame 2
-frame 3

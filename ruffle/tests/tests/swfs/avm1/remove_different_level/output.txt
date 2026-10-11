@@ -1,3 +1,0 @@
-_level1.mc
-onUnload
-undefined

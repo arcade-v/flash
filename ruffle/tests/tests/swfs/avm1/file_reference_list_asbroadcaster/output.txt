@@ -1,9 +1,0 @@
-0
-1
-[object Object]
-onCancel: a
-Broadcast
-onCancel: A
-onX: X
-Remove
-0

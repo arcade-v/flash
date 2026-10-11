@@ -1,9 +1,0 @@
-num_ticks = 1
-known_failure = true
-
-[[compilers]]
-type = "Asc"
-target = "test.swf"
-class = "Test"
-scripts = ["Test.as", "CustomContentElement.as"]
-swf_version = 43

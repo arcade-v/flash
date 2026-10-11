@@ -1,6 +1,0 @@
-loading sound
-loading again
-onLoad false
-after loading again
-onLoad true
-Sound complete

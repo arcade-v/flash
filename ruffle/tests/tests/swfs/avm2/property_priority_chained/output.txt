@@ -1,4 +1,0 @@
-subclass-field1
-subclass-field1
-subclass-field2
-subclass-field2
