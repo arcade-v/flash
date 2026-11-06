@@ -1,0 +1,969 @@
+diff --git a/core/src/avm2/globals/com/amanitadesign/steam/FRESteamWorks.as b/core/src/avm2/globals/com/amanitadesign/steam/FRESteamWorks.as
+new file mode 100644
+index 00000000..2b359480
+--- /dev/null
++++ b/core/src/avm2/globals/com/amanitadesign/steam/FRESteamWorks.as
+@@ -0,0 +1,57 @@
++package com.amanitadesign.steam {
++    import flash.events.EventDispatcher;
++    import flash.events.IEventDispatcher;
++    import flash.external.ExternalInterface;
++
++    // Stand-in for the FRESteamWorks AIR native extension (Henry Stickmin web port patch).
++    // Native extensions can't exist on the web, so this reports "Steam is not running":
++    // init() returns false and everything else is a harmless no-op. Achievements are
++    // forwarded to the page (window.__ruffleAirFS("achievement", name)) so it can show them.
++    [API("661")]
++    public class FRESteamWorks extends EventDispatcher {
++        public var isReady:Boolean = false;
++
++        public function FRESteamWorks(target:IEventDispatcher = null) {
++            super(target);
++        }
++
++        public function init():Boolean { return false; }
++        public function dispose():void {}
++        public function runCallbacks():Boolean { return false; }
++        public function isSteamRunning():Boolean { return false; }
++        public function getUserID():String { return ""; }
++        public function getPersonaName():String { return ""; }
++        public function getCurrentGameLanguage():String { return "english"; }
++        public function getAppID():uint { return 0; }
++
++        public function setAchievement(name:String):Boolean {
++            if (ExternalInterface.available) {
++                try {
++                    ExternalInterface.call("__ruffleAirFS", "achievement", name);
++                } catch (e:Error) {
++                }
++            }
++            return false;
++        }
++
++        public function clearAchievement(name:String):Boolean { return false; }
++        public function isAchievement(name:String):Boolean { return false; }
++        public function indicateAchievementProgress(name:String, current:int, max:int):Boolean { return false; }
++        public function storeStats():Boolean { return false; }
++        public function requestStats():Boolean { return false; }
++        public function resetAllStats(achievementsToo:Boolean):Boolean { return false; }
++        public function getStatInt(name:String):int { return 0; }
++        public function getStatFloat(name:String):Number { return 0; }
++        public function setStatInt(name:String, value:int):Boolean { return false; }
++        public function setStatFloat(name:String, value:Number):Boolean { return false; }
++        public function isCloudEnabledForApp():Boolean { return false; }
++        public function isCloudEnabledForAccount():Boolean { return false; }
++        public function setCloudEnabledForApp(enabled:Boolean):Boolean { return false; }
++        public function fileExists(name:String):Boolean { return false; }
++        public function fileRead(name:String, data:*):Boolean { return false; }
++        public function fileWrite(name:String, data:*):Boolean { return false; }
++        public function fileDelete(name:String):Boolean { return false; }
++        public function activateGameOverlay(dialog:String):Boolean { return false; }
++        public function isOverlayEnabled():Boolean { return false; }
++    }
++}
+diff --git a/core/src/avm2/globals/flash/desktop/NativeApplication.as b/core/src/avm2/globals/flash/desktop/NativeApplication.as
+index 48072a86..ca4178f3 100644
+--- a/core/src/avm2/globals/flash/desktop/NativeApplication.as
++++ b/core/src/avm2/globals/flash/desktop/NativeApplication.as
+@@ -6,6 +6,7 @@ package flash.desktop {
+     import flash.events.EventDispatcher;
+     import flash.system.Security;
+     import flash.utils.Timer;
++    import flash.external.ExternalInterface;
+     import flash.utils.setTimeout;
+     import __ruffle__.stub_method;
+     import __ruffle__.stub_getter;
+@@ -61,7 +62,13 @@ package flash.desktop {
+         }
+ 
+         public function exit(exitCode:int = 0):void {
+-            stub_method("flash.desktop.NativeApplication", "exit");
++            // Web port patch: a page can't close itself, so tell it the app asked to exit.
++            if (flash.external.ExternalInterface.available) {
++                try {
++                    flash.external.ExternalInterface.call("__ruffleAirFS", "exit", exitCode);
++                } catch (e:Error) {
++                }
++            }
+         }
+ 
+         public function get runtimeVersion():String {
+diff --git a/core/src/avm2/globals/flash/filesystem/File.as b/core/src/avm2/globals/flash/filesystem/File.as
+index 3d10828e..73b7f420 100644
+--- a/core/src/avm2/globals/flash/filesystem/File.as
++++ b/core/src/avm2/globals/flash/filesystem/File.as
+@@ -1,111 +1,371 @@
+ package flash.filesystem {
+-    import __ruffle__.stub_constructor;
+-    import __ruffle__.stub_getter;
+     import __ruffle__.stub_method;
+ 
++    import flash.errors.IOError;
++    import flash.external.ExternalInterface;
+     import flash.net.FileReference;
++    import flash.utils.ByteArray;
+ 
++    // Web implementation of AIR's File (Henry Stickmin web port patch).
++    //
++    // A File is a (root, path) pair:
++    //   root "app"     - File.applicationDirectory: read-only files next to the SWF.
++    //                    `url` is the plain relative path, so Loader/URLLoader resolve it
++    //                    against the movie's base URL like any other relative URL.
++    //   root "storage" - File.applicationStorageDirectory: save data.
++    //   root "other"   - anything else (documents/user directories, absolute paths).
++    //
++    // Actual I/O goes through a synchronous JavaScript bridge, window.__ruffleAirFS(op, ...),
++    // reached via ExternalInterface (the page must set allowScriptAccess: true). If the page
++    // provides no bridge, files live in memory for the session only.
+     [API("661")]
+     public class File extends FileReference {
+         private static var _applicationDirectory:File = null;
+         private static var _applicationStorageDirectory:File = null;
+         private static var _documentsDirectory:File = null;
+         private static var _userDirectory:File = null;
++        private static var _desktopDirectory:File = null;
++        private static var _memory:Object = null;
++
++        internal var _root:String = "other";
++        internal var _path:String = "";
+ 
+         public function File(path:String = null) {
+-            stub_constructor("flash.filesystem.File");
++            super();
++            if (path === null) {
++                return;
++            }
++            if (path.indexOf("app:/") == 0) {
++                _root = "app";
++                _path = normalize(path.substr(5));
++            } else if (path.indexOf("app-storage:/") == 0) {
++                _root = "storage";
++                _path = normalize(path.substr(13));
++            } else if (path.indexOf("file:///") == 0) {
++                _path = normalize(path.substr(8));
++            } else {
++                _path = normalize(path);
++            }
+         }
+ 
+-        public static function get applicationDirectory():File {
+-            stub_getter("flash.filesystem.File", "applicationDirectory");
++        internal static function make(root:String, path:String):File {
++            var f:File = new File();
++            f._root = root;
++            f._path = normalize(path);
++            return f;
++        }
+ 
+-            if (_applicationDirectory === null) {
+-                _applicationDirectory = new File();
++        private static function normalize(path:String):String {
++            var parts:Array = path.split("\\").join("/").split("/");
++            var out:Array = [];
++            for (var i:int = 0; i < parts.length; i++) {
++                var p:String = parts[i];
++                if (p == "" || p == ".") {
++                    continue;
++                }
++                if (p == "..") {
++                    if (out.length > 0) {
++                        out.pop();
++                    }
++                    continue;
++                }
++                out.push(p);
++            }
++            return out.join("/");
++        }
++
++        // ---- bridge -------------------------------------------------------
++
++        internal static function bridge(op:String, ...args):* {
++            if (ExternalInterface.available) {
++                try {
++                    var callArgs:Array = ["__ruffleAirFS", op];
++                    return ExternalInterface.call.apply(null, callArgs.concat(args));
++                } catch (e:Error) {
++                    // fall through to the in-memory store
++                }
++            }
++            return memoryBridge(op, args);
++        }
++
++        private static function memoryBridge(op:String, args:Array):* {
++            if (_memory === null) {
++                _memory = {};
++            }
++            var key:String = args[0] + ":" + args[1];
++            switch (op) {
++                case "exists":
++                    return _memory.hasOwnProperty(key);
++                case "read":
++                    return _memory.hasOwnProperty(key) ? _memory[key] : null;
++                case "write":
++                    _memory[key] = args[2];
++                    return true;
++                case "delete":
++                    delete _memory[key];
++                    return true;
++                case "move":
++                case "copy":
++                    var dst:String = args[2] + ":" + args[3];
++                    if (_memory.hasOwnProperty(key)) {
++                        _memory[dst] = _memory[key];
++                        if (op == "move") {
++                            delete _memory[key];
++                        }
++                    }
++                    return true;
++            }
++            return null;
++        }
++
++        internal static function hexToBytes(hex:String, out:ByteArray):void {
++            var n:int = hex.length;
++            for (var i:int = 0; i + 1 < n; i += 2) {
++                out.writeByte(parseInt(hex.substr(i, 2), 16));
++            }
++            out.position = 0;
++        }
++
++        internal static function bytesToHex(bytes:ByteArray):String {
++            var digits:String = "0123456789abcdef";
++            var parts:Array = [];
++            var n:uint = bytes.length;
++            for (var i:uint = 0; i < n; i++) {
++                var v:int = bytes[i];
++                parts.push(digits.charAt(v >> 4) + digits.charAt(v & 15));
++            }
++            return parts.join("");
++        }
++
++        internal function readAll():ByteArray {
++            var hex:* = bridge("read", _root, _path);
++            if (hex === null || hex === undefined) {
++                return null;
++            }
++            var out:ByteArray = new ByteArray();
++            hexToBytes(String(hex), out);
++            return out;
++        }
++
++        internal function writeAll(bytes:ByteArray):void {
++            if (_root == "app") {
++                throw new SecurityError("Error #3001: File or directory access denied.", 3001);
+             }
++            bridge("write", _root, _path, bytesToHex(bytes));
++        }
+ 
++        // ---- static directories ------------------------------------------
++
++        public static function get applicationDirectory():File {
++            if (_applicationDirectory === null) {
++                _applicationDirectory = make("app", "");
++            }
+             return _applicationDirectory;
+         }
+ 
+         public static function get applicationStorageDirectory():File {
+-            stub_getter("flash.filesystem.File", "applicationStorageDirectory");
+-
+             if (_applicationStorageDirectory === null) {
+-                _applicationStorageDirectory = new File();
++                _applicationStorageDirectory = make("storage", "");
+             }
+-
+             return _applicationStorageDirectory;
+         }
+ 
+         public static function get documentsDirectory():File {
+-            stub_getter("flash.filesystem.File", "documentsDirectory");
+-
+             if (_documentsDirectory === null) {
+-                _documentsDirectory = new File();
++                _documentsDirectory = make("other", "Documents");
+             }
+-
+             return _documentsDirectory;
+         }
+ 
+         public static function get userDirectory():File {
+-            stub_getter("flash.filesystem.File", "userDirectory");
+-
+             if (_userDirectory === null) {
+-                _userDirectory = new File();
++                _userDirectory = make("other", "");
+             }
+-
+             return _userDirectory;
+         }
+ 
+-        public static function get separator():String {
+-            stub_getter("flash.filesystem.File", "separator");
++        public static function get desktopDirectory():File {
++            if (_desktopDirectory === null) {
++                _desktopDirectory = make("other", "Desktop");
++            }
++            return _desktopDirectory;
++        }
+ 
++        public static function get separator():String {
+             return "/";
+         }
+ 
+-        public function resolvePath(path:String):File {
+-            stub_method("flash.filesystem.File", "resolvePath");
++        public static function get lineEnding():String {
++            return "\n";
++        }
++
++        // ---- properties ---------------------------------------------------
++
++        public function get url():String {
++            if (_root == "app") {
++                // The page resolves this to an absolute URL next to the SWF; without a
++                // bridge, a relative URL still resolves against the movie's base.
++                var absolute:* = bridge("appUrl", _root, _path);
++                return absolute is String ? String(absolute) : _path;
++            }
++            if (_root == "storage") {
++                return "app-storage:/" + _path;
++            }
++            return "file:///" + _path;
++        }
++
++        public function set url(value:String):void {
++            var f:File = new File(value);
++            _root = f._root;
++            _path = f._path;
++        }
++
++        public function get nativePath():String {
++            return url;
++        }
+ 
+-            return new File();
++        public function set nativePath(value:String):void {
++            url = value;
+         }
+ 
+         public function get exists():Boolean {
+-            stub_getter("flash.filesystem.File", "exists");
++            return Boolean(bridge("exists", _root, _path));
++        }
++
++        public function get isDirectory():Boolean {
++            return _path == "" || Boolean(bridge("isDir", _root, _path));
++        }
+ 
++        public function get isHidden():Boolean {
+             return false;
+         }
+ 
+-        public function get nativePath():String {
+-            stub_getter("flash.filesystem.File", "nativePath");
++        public function get isPackage():Boolean {
++            return false;
++        }
+ 
+-            return "";
++        public function get isSymbolicLink():Boolean {
++            return false;
+         }
+ 
+-        public function get url():String {
+-            stub_getter("flash.filesystem.File", "url");
++        public function get parent():File {
++            if (_path == "") {
++                return null;
++            }
++            var slash:int = _path.lastIndexOf("/");
++            return make(_root, slash < 0 ? "" : _path.substr(0, slash));
++        }
++
++        public function get spaceAvailable():Number {
++            return 1073741824;
++        }
++
++        // ---- methods ------------------------------------------------------
++
++        public function resolvePath(path:String):File {
++            if (path.indexOf("app:/") == 0 || path.indexOf("app-storage:/") == 0 || path.indexOf("file:///") == 0) {
++                return new File(path);
++            }
++            return make(_root, _path == "" ? path : _path + "/" + path);
++        }
++
++        public function getRelativePath(ref:FileReference, useDotDot:Boolean = false):String {
++            var other:File = ref as File;
++            if (other === null || other._root != _root) {
++                return null;
++            }
++            if (other._path.indexOf(_path + "/") == 0) {
++                return other._path.substr(_path.length + 1);
++            }
++            return _path == "" ? other._path : null;
++        }
+ 
+-            return "";
++        public function clone():File {
++            return make(_root, _path);
+         }
+ 
+         public function canonicalize():void {
+-            stub_method("flash.filesystem.File", "canonicalize");
+         }
+ 
+         public function createDirectory():void {
+-            stub_method("flash.filesystem.File", "createDirectory");
++        }
++
++        public function deleteFile():void {
++            if (_root == "app") {
++                throw new SecurityError("Error #3001: File or directory access denied.", 3001);
++            }
++            bridge("delete", _root, _path);
++        }
++
++        public function deleteFileAsync():void {
++            deleteFile();
+         }
+ 
+         public function deleteDirectory(deleteDirectoryContents:Boolean = false):void {
+-            stub_method("flash.filesystem.File", "deleteDirectory");
++            bridge("delete", _root, _path);
++        }
++
++        public function moveToTrash():void {
++            deleteFile();
+         }
+ 
+         public function getDirectoryListing():Array {
+-            stub_method("flash.filesystem.File", "getDirectoryListing");
++            var names:* = bridge("list", _root, _path);
++            var out:Array = [];
++            if (names is Array) {
++                for each (var n:String in names) {
++                    out.push(resolvePath(n));
++                }
++            }
++            return out;
++        }
+ 
+-            return [];
++        private function transferTo(newLocation:FileReference, overwrite:Boolean, op:String):void {
++            var dst:File = newLocation as File;
++            if (dst === null) {
++                throw new ArgumentError("Error #2004: One of the parameters is invalid.", 2004);
++            }
++            if (dst._root == "app") {
++                throw new SecurityError("Error #3001: File or directory access denied.", 3001);
++            }
++            if (!exists) {
++                throw new IOError("Error #3003: File or directory does not exist.", 3003);
++            }
++            if (!overwrite && dst.exists) {
++                throw new IOError("Error #3004: Cannot create file.", 3004);
++            }
++            bridge(op, _root, _path, dst._root, dst._path);
+         }
+ 
+         public function moveTo(newLocation:FileReference, overwrite:Boolean = false):void {
+-            stub_method("flash.filesystem.File", "moveTo");
++            transferTo(newLocation, overwrite, "move");
++            var dst:File = File(newLocation);
++            _root = dst._root;
++            _path = dst._path;
++        }
++
++        public function moveToAsync(newLocation:FileReference, overwrite:Boolean = false):void {
++            moveTo(newLocation, overwrite);
++        }
++
++        public function copyTo(newLocation:FileReference, overwrite:Boolean = false):void {
++            transferTo(newLocation, overwrite, "copy");
++        }
++
++        public function copyToAsync(newLocation:FileReference, overwrite:Boolean = false):void {
++            copyTo(newLocation, overwrite);
++        }
++
++        public function browseForDirectory(title:String):void {
++            stub_method("flash.filesystem.File", "browseForDirectory");
++        }
++
++        public function browseForOpen(title:String, typeFilter:Array = null):void {
++            stub_method("flash.filesystem.File", "browseForOpen");
++        }
++
++        public function browseForSave(title:String):void {
++            stub_method("flash.filesystem.File", "browseForSave");
+         }
+     }
+ }
+diff --git a/core/src/avm2/globals/flash/filesystem/FileMode.as b/core/src/avm2/globals/flash/filesystem/FileMode.as
+new file mode 100644
+index 00000000..aa450fff
+--- /dev/null
++++ b/core/src/avm2/globals/flash/filesystem/FileMode.as
+@@ -0,0 +1,9 @@
++package flash.filesystem {
++    [API("661")]
++    public final class FileMode {
++        public static const READ:String = "read";
++        public static const WRITE:String = "write";
++        public static const APPEND:String = "append";
++        public static const UPDATE:String = "update";
++    }
++}
+diff --git a/core/src/avm2/globals/flash/filesystem/FileStream.as b/core/src/avm2/globals/flash/filesystem/FileStream.as
+index 185721c3..2f3841bd 100644
+--- a/core/src/avm2/globals/flash/filesystem/FileStream.as
++++ b/core/src/avm2/globals/flash/filesystem/FileStream.as
+@@ -1,18 +1,131 @@
+ package flash.filesystem {
+-    import __ruffle__.stub_method;
+-
++    import flash.errors.IOError;
++    import flash.events.Event;
+     import flash.events.EventDispatcher;
++    import flash.utils.ByteArray;
++    import flash.utils.IDataInput;
++    import flash.utils.IDataOutput;
+ 
+-    // TODO this class should implement IDataInput and IDataOutput
+-
++    // Web implementation of AIR's FileStream (Henry Stickmin web port patch).
++    // open() loads the whole file into a ByteArray; close() writes it back through
++    // File's bridge if the stream was opened for writing.
+     [API("661")]
+-    public class FileStream extends EventDispatcher {
++    public class FileStream extends EventDispatcher implements IDataInput, IDataOutput {
++        private var _data:ByteArray = new ByteArray();
++        private var _file:File = null;
++        private var _writable:Boolean = false;
++
+         public function FileStream() {
+             super();
+         }
+ 
++        public function open(file:File, fileMode:String):void {
++            if (file === null) {
++                throw new TypeError("Error #2007: Parameter file must be non-null.", 2007);
++            }
++            var writable:Boolean = fileMode != FileMode.READ;
++            if (writable && file._root == "app") {
++                throw new SecurityError("Error #3001: File or directory access denied.", 3001);
++            }
++            _file = file;
++            _writable = writable;
++            _data = new ByteArray();
++            if (fileMode == FileMode.WRITE) {
++                file.writeAll(_data); // AIR creates/truncates the file immediately
++                return;
++            }
++            var existing:ByteArray = file.readAll();
++            if (existing === null) {
++                if (!writable) {
++                    _file = null;
++                    throw new IOError("Error #3003: File or directory does not exist.", 3003);
++                }
++                file.writeAll(_data);
++            } else {
++                _data = existing;
++            }
++            _data.position = fileMode == FileMode.APPEND ? _data.length : 0;
++        }
++
++        public function openAsync(file:File, fileMode:String):void {
++            open(file, fileMode);
++            dispatchEvent(new Event(Event.COMPLETE));
++        }
++
+         public function close():void {
+-            stub_method("flash.filesystem.FileStream", "close");
++            if (_file !== null && _writable) {
++                _file.writeAll(_data);
++            }
++            _file = null;
++            _writable = false;
++            dispatchEvent(new Event(Event.CLOSE));
++        }
++
++        public function truncate():void {
++            _data.length = _data.position;
++        }
++
++        public function get bytesAvailable():uint {
++            return _data.bytesAvailable;
++        }
++
++        public function get position():Number {
++            return _data.position;
++        }
++
++        public function set position(value:Number):void {
++            _data.position = uint(value);
+         }
++
++        public function get readAhead():Number {
++            return Number.POSITIVE_INFINITY;
++        }
++
++        public function set readAhead(value:Number):void {
++        }
++
++        public function get endian():String {
++            return _data.endian;
++        }
++
++        public function set endian(type:String):void {
++            _data.endian = type;
++        }
++
++        public function get objectEncoding():uint {
++            return _data.objectEncoding;
++        }
++
++        public function set objectEncoding(version:uint):void {
++            _data.objectEncoding = version;
++        }
++
++        public function readBoolean():Boolean { return _data.readBoolean(); }
++        public function readByte():int { return _data.readByte(); }
++        public function readBytes(bytes:ByteArray, offset:uint = 0, length:uint = 0):void { _data.readBytes(bytes, offset, length); }
++        public function readDouble():Number { return _data.readDouble(); }
++        public function readFloat():Number { return _data.readFloat(); }
++        public function readInt():int { return _data.readInt(); }
++        public function readMultiByte(length:uint, charSet:String):String { return _data.readMultiByte(length, charSet); }
++        public function readObject():* { return _data.readObject(); }
++        public function readShort():int { return _data.readShort(); }
++        public function readUnsignedByte():uint { return _data.readUnsignedByte(); }
++        public function readUnsignedInt():uint { return _data.readUnsignedInt(); }
++        public function readUnsignedShort():uint { return _data.readUnsignedShort(); }
++        public function readUTF():String { return _data.readUTF(); }
++        public function readUTFBytes(length:uint):String { return _data.readUTFBytes(length); }
++
++        public function writeBoolean(value:Boolean):void { _data.writeBoolean(value); }
++        public function writeByte(value:int):void { _data.writeByte(value); }
++        public function writeBytes(bytes:ByteArray, offset:uint = 0, length:uint = 0):void { _data.writeBytes(bytes, offset, length); }
++        public function writeDouble(value:Number):void { _data.writeDouble(value); }
++        public function writeFloat(value:Number):void { _data.writeFloat(value); }
++        public function writeInt(value:int):void { _data.writeInt(value); }
++        public function writeMultiByte(value:String, charSet:String):void { _data.writeMultiByte(value, charSet); }
++        public function writeObject(object:*):void { _data.writeObject(object); }
++        public function writeShort(value:int):void { _data.writeShort(value); }
++        public function writeUnsignedInt(value:uint):void { _data.writeUnsignedInt(value); }
++        public function writeUTF(value:String):void { _data.writeUTF(value); }
++        public function writeUTFBytes(value:String):void { _data.writeUTFBytes(value); }
+     }
+ }
+diff --git a/core/src/avm2/globals/globals.as b/core/src/avm2/globals/globals.as
+index 84c9734b..c6c64adc 100644
+--- a/core/src/avm2/globals/globals.as
++++ b/core/src/avm2/globals/globals.as
+@@ -357,8 +357,11 @@ include "flash/net/URLVariables.as"
+ include "flash/net/XMLSocket.as"
+ 
+ include "flash/filesystem/File.as" // File extends FileReference
++include "flash/filesystem/FileMode.as"
+ include "flash/filesystem/FileStream.as"
+ 
++include "com/amanitadesign/steam/FRESteamWorks.as"
++
+ include "flash/net/drm/AuthenticationMethod.as"
+ include "flash/net/drm/DRMContentData.as"
+ include "flash/net/drm/DRMDeviceGroup.as"
+diff --git a/core/src/backend/audio.rs b/core/src/backend/audio.rs
+index 0f63f6b1..c7a73651 100644
+--- a/core/src/backend/audio.rs
++++ b/core/src/backend/audio.rs
+@@ -475,6 +475,7 @@ impl<'gc> AudioManager<'gc> {
+                 avm1_object,
+                 avm2_object: None,
+                 stream_start_frame: None,
++                stream_frame_duration: None,
+             };
+ 
+             if let Some(transform) = transform {
+@@ -605,6 +606,7 @@ impl<'gc> AudioManager<'gc> {
+                 avm1_object: None,
+                 avm2_object: None,
+                 stream_start_frame: Some(clip_frame),
++                stream_frame_duration: Self::stream_frame_duration(stream_info),
+             };
+             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
+             self.sounds.push(instance);
+@@ -631,6 +633,7 @@ impl<'gc> AudioManager<'gc> {
+                 avm1_object: None,
+                 avm2_object: None,
+                 stream_start_frame: None,
++                stream_frame_duration: None,
+             };
+             audio.set_sound_transform(handle, self.transform_for_sound(&instance));
+             self.sounds.push(instance);
+@@ -640,6 +643,18 @@ impl<'gc> AudioManager<'gc> {
+         }
+     }
+ 
++    /// Seconds per timeline frame implied by a stream's header, if plausible.
++    fn stream_frame_duration(head: &swf::SoundStreamHead) -> Option<f64> {
++        let rate = f64::from(head.stream_format.sample_rate);
++        let samples = f64::from(head.num_samples_per_block);
++        if rate <= 0.0 || samples <= 0.0 {
++            return None;
++        }
++        let duration = samples / rate;
++        // Ignore nonsense values (outside 5..120 fps) and fall back to the movie's rate.
++        (1.0 / 120.0..=1.0 / 5.0).contains(&duration).then_some(duration)
++    }
++
+     /// Returns the difference in seconds between the primary audio stream's time and the player's time.
+     pub fn audio_skew_time(&mut self, audio: &mut dyn AudioBackend, offset_ms: f64) -> f64 {
+         // Consider the first playing "stream" sound to be the primary audio track.
+@@ -654,12 +669,14 @@ impl<'gc> AudioManager<'gc> {
+                     .display_object
+                     .and_then(|clip| clip.as_movie_clip())?;
+                 let stream_pos = audio.get_sound_position(instance.instance)?;
+-                let frame_rate = clip.movie().frame_rate().to_f64();
++                let frame_duration = instance
++                    .stream_frame_duration
++                    .unwrap_or_else(|| 1.0 / clip.movie().frame_rate().to_f64());
+ 
+                 // Calculate the difference in time between the owning movie clip and its audio track.
+                 // If the difference is beyond some threshold, inform the player to adjust playback speed.
+                 let timeline_pos = f64::from(clip.current_frame().saturating_sub(start_frame))
+-                    / frame_rate
++                    * frame_duration
+                     + offset_ms / 1000.0;
+ 
+                 Some((i, stream_pos / 1000.0 - timeline_pos))
+@@ -872,6 +889,15 @@ pub struct SoundInstance<'gc> {
+     avm2_object: Option<SoundChannelObject<'gc>>,
+ 
+     stream_start_frame: Option<u16>,
++
++    /// Seconds of audio per timeline frame for a "stream" sound, from its
++    /// `SoundStreamHead` (samples per block / sample rate). This is the frame
++    /// rate the stream was authored at, which is what timeline sync must use:
++    /// a movie's header frame rate can differ from it (e.g. when the content
++    /// changes `stage.frameRate` at runtime, or a file merges scenes authored
++    /// at different rates).
++    #[collect(require_static)]
++    stream_frame_duration: Option<f64>,
+ }
+ 
+ /// A sound transform for a playing sound, for use by audio backends.
+diff --git a/core/src/display_object/graphic.rs b/core/src/display_object/graphic.rs
+index c0a72b14..c33bfb90 100644
+--- a/core/src/display_object/graphic.rs
++++ b/core/src/display_object/graphic.rs
+@@ -8,7 +8,7 @@ use crate::display_object::{BoundsMode, DisplayObjectBase};
+ use crate::drawing::Drawing;
+ use crate::library::MovieLibrarySource;
+ use crate::prelude::*;
+-use crate::tag_utils::SwfMovie;
++use crate::tag_utils::{SwfMovie, SwfSlice};
+ use crate::tessellation_cache::TessellationCache;
+ use crate::vminterface::Instantiator;
+ use core::fmt;
+@@ -46,23 +46,28 @@ pub struct GraphicData<'gc> {
+ }
+ 
+ impl<'gc> Graphic<'gc> {
+-    /// Construct a `Graphic` from it's associated `Shape` tag.
++    /// Construct a `Graphic` from its `DefineShape` tag.
++    ///
++    /// Only the tag header (id and bounds) is read here. The shape records stay
++    /// in the movie's own data (`shape_data`) and are parsed and tessellated the
++    /// first time the shape is actually drawn. Doing this eagerly for every shape
++    /// at preload costs roughly 16x the shape data in heap memory, which large
++    /// vector-animation movies cannot fit into the 4GB WebAssembly address space.
+     pub fn from_swf_tag(
+         context: &mut UpdateContext<'gc>,
+-        swf_shape: swf::Shape,
++        id: CharacterId,
++        shape_bounds: Rectangle<Twips>,
++        edge_bounds: Rectangle<Twips>,
++        shape_data: SwfSlice,
++        version: u8,
+         movie: SwfMovie<'gc>,
+     ) -> Self {
+-        let library = context.library.library_for_movie(movie).unwrap();
+         let shared = GraphicShared {
+-            id: swf_shape.id,
+-            shape_bounds: swf_shape.shape_bounds,
+-            edge_bounds: swf_shape.edge_bounds,
+-            render_handle: Some(
+-                context
+-                    .renderer
+-                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
+-            ),
+-            shape: swf_shape,
++            id,
++            shape_bounds,
++            edge_bounds,
++            render_handle: OnceCell::new(),
++            shape_data: Some((shape_data, version)),
+             movie,
+             scaled_handle: RefCell::new(TessellationCache::new()),
+         };
+@@ -85,19 +90,8 @@ impl<'gc> Graphic<'gc> {
+             id: 0,
+             shape_bounds: Default::default(),
+             edge_bounds: Default::default(),
+-            render_handle: None,
+-            shape: swf::Shape {
+-                version: 32,
+-                id: 0,
+-                shape_bounds: Default::default(),
+-                edge_bounds: Default::default(),
+-                flags: swf::ShapeFlag::empty(),
+-                styles: swf::ShapeStyles {
+-                    fill_styles: Vec::new(),
+-                    line_styles: Vec::new(),
+-                },
+-                shape: Vec::new(),
+-            },
++            render_handle: OnceCell::new(),
++            shape_data: None,
+             movie: *context.root_swf,
+             scaled_handle: RefCell::new(TessellationCache::new()),
+         };
+@@ -151,9 +145,9 @@ impl<'gc> Graphic<'gc> {
+ 
+         // Retessellate at the new scale
+         let library = context.library.library_for_movie(shared.movie);
+-        if let Some(library) = library {
++        if let (Some(library), Some(shape)) = (library, shared.parse_shape()) {
+             let new_handle = context.renderer.register_shape_with_scale(
+-                (&shared.shape).into(),
++                (&shape).into(),
+                 &MovieLibrarySource { library },
+                 current_scale,
+             );
+@@ -254,7 +248,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+ 
+         if let Some(drawing) = self.0.drawing.get() {
+             drawing.borrow().render(context);
+-        } else if let Some(base_handle) = self.0.shared.get().render_handle.clone() {
++        } else if let Some(base_handle) = self.0.shared.get().render_handle(context) {
+             let transform = context.transform_stack.transform();
+ 
+             // Calculate the current scale from the transform, to determine if
+@@ -289,8 +283,12 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
+                     return true;
+                 }
+             } else {
+-                let shape = &self.0.shared.get().shape;
+-                return ruffle_render::shape_utils::shape_hit_test(shape, point, &local_matrix);
++                return match self.0.shared.get().parse_shape() {
++                    Some(shape) => {
++                        ruffle_render::shape_utils::shape_hit_test(&shape, point, &local_matrix)
++                    }
++                    None => false,
++                };
+             }
+         }
+ 
+@@ -338,11 +336,13 @@ struct GraphicShared<'gc> {
+     movie: SwfMovie<'gc>,
+     id: CharacterId,
+ 
++    /// The raw `DefineShape` tag body and shape version, parsed on demand.
+     #[collect(require_static)]
+-    shape: swf::Shape,
++    shape_data: Option<(SwfSlice, u8)>,
+ 
++    /// Tessellated on first render.
+     #[collect(require_static)]
+-    render_handle: Option<ShapeHandle>,
++    render_handle: OnceCell<Option<ShapeHandle>>,
+ 
+     #[collect(require_static)]
+     shape_bounds: Rectangle<Twips>,
+@@ -353,3 +353,35 @@ struct GraphicShared<'gc> {
+     #[collect(require_static)]
+     scaled_handle: RefCell<TessellationCache>,
+ }
++
++impl<'gc> GraphicShared<'gc> {
++    /// Parses this shape's records from the movie data.
++    fn parse_shape(&self) -> Option<swf::Shape> {
++        let (data, version) = self.shape_data.as_ref()?;
++        match data.read_from(0).read_define_shape(*version) {
++            Ok(shape) => Some(shape),
++            Err(e) => {
++                tracing::error!("Failed to parse shape {}: {}", self.id, e);
++                None
++            }
++        }
++    }
++
++    /// The base tessellation of this shape, created on first use.
++    fn render_handle(&self, context: &mut RenderContext<'_, 'gc>) -> Option<ShapeHandle> {
++        if let Some(handle) = self.render_handle.get() {
++            return handle.clone();
++        }
++        let library = context.library.library_for_movie(self.movie);
++        let handle = match (library, self.parse_shape()) {
++            (Some(library), Some(shape)) => Some(
++                context
++                    .renderer
++                    .register_shape((&shape).into(), &MovieLibrarySource { library }),
++            ),
++            _ => None,
++        };
++        let _ = self.render_handle.set(handle.clone());
++        handle
++    }
++}
+diff --git a/core/src/display_object/movie_clip.rs b/core/src/display_object/movie_clip.rs
+index e4463545..239b1192 100644
+--- a/core/src/display_object/movie_clip.rs
++++ b/core/src/display_object/movie_clip.rs
+@@ -3542,9 +3542,24 @@ impl<'gc, 'a> MovieClipShared<'gc> {
+         reader: &mut SwfStream<'a>,
+         version: u8,
+     ) -> Result<(), Error> {
+-        let swf_shape = reader.read_define_shape(version)?;
+-        let id = swf_shape.id;
+-        let graphic = Graphic::from_swf_tag(context, swf_shape, self.movie());
++        // Keep a reference to the tag body; the shape is parsed lazily (see Graphic).
++        let shape_data = SwfSlice::from(self.movie()).to_subslice(reader.get_ref());
++        let id = reader.read_u16()?;
++        let shape_bounds = reader.read_rectangle()?;
++        let edge_bounds = if version >= 4 {
++            reader.read_rectangle()?
++        } else {
++            shape_bounds
++        };
++        let graphic = Graphic::from_swf_tag(
++            context,
++            id,
++            shape_bounds,
++            edge_bounds,
++            shape_data,
++            version,
++            self.movie(),
++        );
+         self.library_mut(context)
+             .register_character(id, Character::Graphic(graphic));
+         Ok(())
+diff --git a/core/src/player.rs b/core/src/player.rs
+index 1fceaf66..ce65c969 100644
+--- a/core/src/player.rs
++++ b/core/src/player.rs
+@@ -604,7 +604,11 @@ impl Player {
+                 .audio_manager
+                 .audio_skew_time(context.audio, cur_frame_offset)
+         });
+-        self.frame_accumulator += FloatDuration::from_secs(audio_skew);
++        // Apply at most one frame of correction per tick, so catching up after a
++        // slow frame is a brief speed-up (<= 2x) instead of a visible multi-frame jump.
++        let max_correction = frame_duration.as_millis() / 1000.0;
++        self.frame_accumulator +=
++            FloatDuration::from_secs(audio_skew.clamp(-max_correction, max_correction));
+ 
+         self.update_sockets();
+         self.update_net_connections();

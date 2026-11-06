@@ -1,0 +1,2 @@
+Ruffle 8e9793bbb2957b9f7b44d5e0aebd69c4f461b43e + ruffle-patches/henry-web.patch
+Built 2026-10-10T05:34:38Z
