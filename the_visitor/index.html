@@ -4,31 +4,52 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <style>
-        body {
-            margin: 0;
-            padding: 0;
-            background-color: transparent;
-        }
+    * {
+        box-sizing: border-box;
+    }
 
-        #ruffle {
-            width: 100%;
-            height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+    }
 
-        #ruffle player {
-            width: 100%;
-            height: 100%;
-        }
-
-        #error {
-            color: white;
-            font-family: Arial, sans-serif;
-            text-align: center;
-            padding: 20px;
-        }
+    #ruffle {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+    
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+    
+    #player {
+        display: block;
+        width: 100%;
+        height: 100%;
+        max-width: 100%;
+        max-height: 100%;
+        overflow: hidden;
+    }
+        
+    #error {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        color: white;
+        font-family: Arial, sans-serif;
+        text-align: center;
+        padding: 20px;
+        pointer-events: none;
+    }
     </style>
 </head>
 
